@@ -1,4 +1,8 @@
 name: Full Upstream Sync
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
 on:
   schedule:
     - cron: '0 0 * * *'
@@ -9,11 +13,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
       - name: Checkout Fork
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2 
         with:
           fetch-depth: 0
 
@@ -27,4 +29,3 @@ jobs:
           git remote add upstream https://github.com/fivetran/hybrid_deployment.git
           git fetch upstream --tags
           git push origin --tags --force
-          
