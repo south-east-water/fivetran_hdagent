@@ -78,6 +78,9 @@ rules:
     resources: ["pods/status"]
     verbs: ["get"]
   - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: [""]
     resources: ["namespaces"]
     verbs: ["get", "list"]
   - apiGroups: [""]
@@ -116,7 +119,7 @@ metadata:
   labels:
     {{- include "hd.labels" (dict "Values" .Values "name" "hd-agent-event-reader") | nindent 4 }}
 rules:
-  - apiGroups: [""]
+  - apiGroups: ["", "events.k8s.io"]
     resources: ["events"]
     verbs: ["get", "list", "watch"]
 
