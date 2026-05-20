@@ -57,6 +57,8 @@ STATS_DIR="$BASE_DIR/stats"
 mkdir -p $STATS_DIR 2>/dev/null
 echo -e "Stats location: $STATS_DIR\n"
 
+CLOCK_SKEW_WARNING_THRESHOLD_SECONDS=30
+CLOCK_SKEW_REFERENCE_URL="https://ldp.orchestrator.fivetran.com"
 CONFIG_FILE=$BASE_DIR/conf/config.json
 LOGDIR=$BASE_DIR/logs
 TOKEN=""
@@ -179,10 +181,25 @@ function log_container_info() {
         docker system df -v > "$STATS_DIR/docker_system_df_v.log" 2>&1
         ps -ef|grep -i docker > "$STATS_DIR/docker_process.log" 2>&1
         
-        docker logs $(docker ps --filter "name=^/controller" --format "{{.Names}}") > "$STATS_DIR/docker_controller.log" 2>&1
-        docker inspect $(docker ps --filter "name=^/controller" --format "{{.Names}}") > "$STATS_DIR/docker_controller_inspect.log" 2>&1
-        sed -E '/"TOKEN=.*"/d; /"*.client_private_key=.*"/d; /"*.client_cert=.*"/d; /"*.clientCert=.*"/d' "$STATS_DIR/docker_controller_inspect.log" > "$STATS_DIR/docker_agent_inspect.log"
-        rm $STATS_DIR/docker_controller_inspect.log
+        # Find the HD agent container - first try the standard 'controller' name
+        CONTROLLER_NAMES=$(docker ps --filter "name=^/controller" --format "{{.Names}}")
+        # Fallback: customer may have renamed the container; search for any running container with 'fivetran' in the name
+        if [ -z "$CONTROLLER_NAMES" ]; then
+            echo "No container named 'controller' found. Searching for containers with 'fivetran' in name..." >&2
+            CONTROLLER_NAMES=$(docker ps --filter "name=fivetran" --format "{{.Names}}")
+        fi
+        if [ -n "$CONTROLLER_NAMES" ]; then
+            echo "HD agent container(s) found: $CONTROLLER_NAMES" >&2
+            docker logs $CONTROLLER_NAMES > "$STATS_DIR/docker_controller.log" 2>&1
+            docker inspect $CONTROLLER_NAMES > "$STATS_DIR/docker_controller_inspect.log" 2>&1
+            sed -E '/"TOKEN=.*"/d; /"*.client_private_key=.*"/d; /"*.client_cert=.*"/d; /"*.clientCert=.*"/d' "$STATS_DIR/docker_controller_inspect.log" > "$STATS_DIR/docker_agent_inspect.log"
+            rm $STATS_DIR/docker_controller_inspect.log
+        else
+            echo "No HD agent container found (tried 'controller' and 'fivetran' name filters)." > "$STATS_DIR/docker_controller.log"
+            echo "Running containers:" >> "$STATS_DIR/docker_controller.log"
+            docker ps --format "{{.Names}} {{.Image}}" >> "$STATS_DIR/docker_controller.log" 2>&1
+            echo "No HD agent container found." > "$STATS_DIR/docker_agent_inspect.log"
+        fi
 
         ls -al $HOME/.docker > "$STATS_DIR/docker_home.log" 2>&1
         if [ -f $HOME/.docker/config.json ]; then
@@ -201,10 +218,25 @@ function log_container_info() {
         podman system df -v > "$STATS_DIR/podman_system_df_v.log" 2>&1
         ps -ef|grep -i podman > "$STATS_DIR/podman_process.log" 2>&1
 
-        podman logs $(podman ps --filter "name=^/controller" --format "{{.Names}}") > "$STATS_DIR/podman_controller.log" 2>&1
-        podman inspect $(podman ps --filter "name=^/controller" --format "{{.Names}}") > "$STATS_DIR/podman_controller_inspect.log" 2>&1
-        sed -E '/"TOKEN=.*"/d; /"*.client_private_key=.*"/d; /"*.client_cert=.*"/d; /"*.clientCert=.*"/d' "$STATS_DIR/podman_controller_inspect.log" > "$STATS_DIR/podman_agent_inspect.log"
-        rm $STATS_DIR/podman_controller_inspect.log
+        # Find the HD agent container - first try the standard 'controller' name
+        CONTROLLER_NAMES=$(podman ps --filter "name=^/controller" --format "{{.Names}}")
+        # Fallback: customer may have renamed the container; search for any running container with 'fivetran' in the name
+        if [ -z "$CONTROLLER_NAMES" ]; then
+            echo "No container named 'controller' found. Searching for containers with 'fivetran' in name..." >&2
+            CONTROLLER_NAMES=$(podman ps --filter "name=fivetran" --format "{{.Names}}")
+        fi
+        if [ -n "$CONTROLLER_NAMES" ]; then
+            echo "HD agent container(s) found: $CONTROLLER_NAMES" >&2
+            podman logs $CONTROLLER_NAMES > "$STATS_DIR/podman_controller.log" 2>&1
+            podman inspect $CONTROLLER_NAMES > "$STATS_DIR/podman_controller_inspect.log" 2>&1
+            sed -E '/"TOKEN=.*"/d; /"*.client_private_key=.*"/d; /"*.client_cert=.*"/d; /"*.clientCert=.*"/d' "$STATS_DIR/podman_controller_inspect.log" > "$STATS_DIR/podman_agent_inspect.log"
+            rm $STATS_DIR/podman_controller_inspect.log
+        else
+            echo "No HD agent container found (tried 'controller' and 'fivetran' name filters)." > "$STATS_DIR/podman_controller.log"
+            echo "Running containers:" >> "$STATS_DIR/podman_controller.log"
+            podman ps --format "{{.Names}} {{.Image}}" >> "$STATS_DIR/podman_controller.log" 2>&1
+            echo "No HD agent container found." > "$STATS_DIR/podman_agent_inspect.log"
+        fi
 
         # rootless (user) podman config
         ls -al $HOME/.config/containers > "$STATS_DIR/podman_home.log" 2>&1
@@ -243,6 +275,15 @@ function log_base_dir_info () {
     ls -altr $BASE_DIR > "$STATS_DIR/base_dir_file_listing.log" 2>&1
     du -sh $BASE_DIR > "$STATS_DIR/base_dir_size.log" 2>&1
     du -sh $BASE_DIR/* >> "$STATS_DIR/base_dir_size.log" 2>&1
+
+    # Capture docker-compose file if the agent was started via docker-compose
+    for compose_file in "$BASE_DIR/docker-compose.yml" "$BASE_DIR/docker-compose.yaml"; do
+        if [ -f "$compose_file" ]; then
+            echo "Found docker-compose file: $compose_file" >&2
+            cat "$compose_file" > "$STATS_DIR/docker_compose.log" 2>&1
+            break
+        fi
+    done
 
     if [ -n "$BASE_DIR/log" ]; then
         ls -altr $BASE_DIR/logs > "$STATS_DIR/base_dir_logs.log" 2>&1
@@ -373,6 +414,39 @@ function test_orchestrator_com () {
     curl -v https://ldp.orchestrator.fivetran.com > "$STATS_DIR/connectivity_orchestrator_fivetran_com.log" 2>&1
 }
 
+function log_clock_skew_check() {
+    local log_file="$STATS_DIR/system_clock_skew_check.log"
+    local server_date server_epoch local_epoch abs_skew
+
+    server_date=$(curl -sSI --max-time 5 "$CLOCK_SKEW_REFERENCE_URL" 2>/dev/null \
+        | awk 'tolower($0) ~ /^date:/ { sub(/\r$/, "", $0); print substr($0, 7); exit }')
+    server_epoch=$(date -u -d "$server_date" +%s 2>/dev/null || true)
+    local_epoch=$(date -u +%s 2>/dev/null || true)
+
+    {
+        echo "Clock skew diagnostic"
+        echo "Local UTC time: $(date -u +"%Y-%m-%d %H:%M:%S UTC" 2>/dev/null || echo unavailable)"
+        echo "Reference endpoint: $CLOCK_SKEW_REFERENCE_URL"
+        echo "Reference HTTP Date: $server_date"
+    } > "$log_file"
+
+    [[ -n "$server_date" ]] || {
+        echo "Result: unable to determine HTTP Date from reference endpoint." >> "$log_file"
+        return
+    }
+    [[ -n "$server_epoch" && -n "$local_epoch" ]] || {
+        echo "Result: unable to determine local system time." >> "$log_file"
+        return
+    }
+
+    abs_skew=$(( local_epoch > server_epoch ? local_epoch - server_epoch : server_epoch - local_epoch ))
+    {
+        echo "Clock skew: ${abs_skew}s"
+        echo "Threshold: warning>${CLOCK_SKEW_WARNING_THRESHOLD_SECONDS}s"
+        echo "Status: $([[ $abs_skew -gt $CLOCK_SKEW_WARNING_THRESHOLD_SECONDS ]] && echo WARNING || echo OK)"
+    } >> "$log_file"
+}
+
 function get_conntrack_values() {
     # Review current conntrack values
     cat /proc/sys/net/netfilter/nf_conntrack_count > "$STATS_DIR/system_proc_sys_net_netfilter_nf_conntrack_count.log"
@@ -456,6 +530,7 @@ log_config
 log_hdagent_logs
 log_resources
 log_network_stats
+log_clock_skew_check
 get_conntrack_values
 
 if [[ "$EXCLUDE_ENV" == "true" ]]; 
@@ -485,4 +560,3 @@ cd -
 
 echo -e "done.\n"
 echo -e "Logs are available in $STATS_DIR/logs-$CONTROLLER_ID.tar.gz\n"
-
