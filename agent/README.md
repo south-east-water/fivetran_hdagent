@@ -43,7 +43,7 @@ helm upgrade --install hd-agent \
  --set config.data_volume_pvc=YOUR_PERSISTENT_VOLUME_CLAIM \
  --set config.token="YOUR_TOKEN_HERE" \
  --set config.namespace=fivetran \
- --version 0.22.0
+ --version 0.24.0
  ```
 
 > Notes:
@@ -70,7 +70,7 @@ helm upgrade --install hd-agent \
  -f values.yaml \
  --create-namespace \
  --namespace fivetran \
- --version 0.22.0
+ --version 0.24.0
 ```
 
 Example values file:
@@ -176,10 +176,21 @@ helm upgrade --install hd-agent \
  --set agent.jvm_xmx=1024m \
  --create-namespace \
  --namespace fivetran \
- --version 0.22.0
+ --version 0.24.0
 ```
 
 > **Note:** JVM memory values support standard Java memory units (e.g., 800m, 1g, 2G). Ensure the JVM memory settings are appropriate for your container memory limits and that both values match for optimal performance.
+
+## Pinning hostnames (config.extra_hosts)
+
+`config.extra_hosts` pins hostnames to specific IPs on the agent pod (rendered as `hostAliases`). The format is a semicolon-separated list of `host:ip` pairs:
+
+```yaml
+config:
+  extra_hosts: "ldp.orchestrator.fivetran.com:35.188.225.82;api.fivetran.com:35.236.237.87"
+```
+
+> **Note:** The above is purely an example. Only set `extra_hosts` if requested by Fivetran Support, or if a DNS override is required.
 
 ## PodDisruptionBudgets
 
