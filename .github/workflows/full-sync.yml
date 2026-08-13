@@ -41,4 +41,10 @@ jobs:
           gh repo sync ${{ github.repository }} --source "fivetran/hybrid_deployment" --branch "main"
           git remote add upstream https://github.com/fivetran/hybrid_deployment.git
           git fetch upstream --tags
-          git push origin --tags --force
+          LATEST_TAG=$(git ls-remote --tags --refs upstream | awk -F/ '{print $3}' | sort -V | tail -n 1)
+          echo "The latest upstream tag is: $LATEST_TAG"
+          if [ -n "$LATEST_TAG" ]; then
+            git push origin "refs/tags/$LATEST_TAG:refs/tags/$LATEST_TAG" --force
+          else
+            echo "No tags found."
+          fi
