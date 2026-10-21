@@ -33,10 +33,15 @@ CONFIG_FILE=conf/config.json
 AGENT_IMAGE="us-docker.pkg.dev/prod-eng-fivetran-ldp/public-docker-us/ldp-agent:production"
 SCRIPT_URL="https://raw.githubusercontent.com/fivetran/hybrid_deployment/main/hdagent.sh"
 CONTAINER_NETWORK="fivetran_ldp"
+# Container labels. New labels are the standard; legacy labels are applied in
+# parallel for backward compatibility.
+# DEPRECATED: remove LEGACY_* labels and fallback logic after deprecation period.
+ORGANIZATION="organization=fivetran"
+PRODUCT="product=hd"
+LEGACY_PRODUCT="fivetran=ldp"
+CONTROLLER_PROCESS_ID="default-controller-process-id"
+CONTROLLER_CONTAINER_TYPE="CONTROLLER"
 LOGDIR=$BASE_DIR/logs
-KERBEROS_KEYTAB_PATH=${KERBEROS_KEYTAB_PATH:-"$BASE_DIR/conf/krb5.keytab"}
-KERBEROS_KRB5_CONF_PATH=${KERBEROS_KRB5_CONF_PATH:-"$BASE_DIR/conf/krb5.conf"}
-KERBEROS_ENV_ARGS=()
 CUSTOM_DNS=""
 TOKEN=""
 CONTROLLER_ID=""
@@ -432,59 +437,6 @@ check_clock_skew() {
     fi
 }
 
-setup_kerberos_auth_if_enabled() {
-    local enable_kerberos=""
-    if [[ -f "$CONFIG_FILE" ]]; then
-        enable_kerberos=$(grep -o '"enable_kerberos_auth": *[a-z]*' "$CONFIG_FILE" | sed 's/.*: *//' | tr -d '"')
-    fi
-
-    if [[ "${enable_kerberos}" != "true" ]]; then
-        return 0
-    fi
-
-    echo "Kerberos authentication enabled, processing Kerberos files..."
-
-    local kerberos_principal=""
-    if [[ -f "$CONFIG_FILE" ]]; then
-        kerberos_principal=$(grep -o '"kerberos_principal": *"[^"]*"' "$CONFIG_FILE" | sed 's/.*: *"//' | tr -d '"')
-    fi
-
-    if [[ -z "${kerberos_principal}" ]]; then
-        echo "Error: kerberos_principal is required in config.json when enable_kerberos_auth is true"
-        exit 1
-    fi
-
-    if [[ ! -f "${KERBEROS_KEYTAB_PATH}" ]]; then
-        echo "Error: Kerberos keytab file not found or not a regular file at: ${KERBEROS_KEYTAB_PATH}"
-        exit 1
-    fi
-    if [[ ! -r "${KERBEROS_KEYTAB_PATH}" ]]; then
-        echo "Error: Kerberos keytab file is not readable at: ${KERBEROS_KEYTAB_PATH}"
-        exit 1
-    fi
-    if [[ ! -f "${KERBEROS_KRB5_CONF_PATH}" ]]; then
-        echo "Error: Kerberos krb5.conf file not found or not a regular file at: ${KERBEROS_KRB5_CONF_PATH}"
-        exit 1
-    fi
-    if [[ ! -r "${KERBEROS_KRB5_CONF_PATH}" ]]; then
-        echo "Error: Kerberos krb5.conf file is not readable at: ${KERBEROS_KRB5_CONF_PATH}"
-        exit 1
-    fi
-
-    local kerberos_keytab_env=$(base64 < "${KERBEROS_KEYTAB_PATH}" | tr -d '\n')
-    local kerberos_krb5_conf_env=$(base64 < "${KERBEROS_KRB5_CONF_PATH}" | tr -d '\n')
-
-    echo "Kerberos principal configured successfully: ${kerberos_principal}"
-    echo "Kerberos files processed successfully"
-
-    KERBEROS_ENV_ARGS=(
-        --env "enable_kerberos_auth=true"
-        --env "kerberos_keytab=${kerberos_keytab_env}"
-        --env "kerberos_krb5_conf=${kerberos_krb5_conf_env}"
-        --env "kerberos_principal=${kerberos_principal}"
-    )
-}
-
 validate_prerequisites() {
     echo -n "Checking prerequisites... "
 
@@ -526,13 +478,35 @@ validate_prerequisites() {
     return 0
 }
 
+# Find agent container IDs matching a name pattern.
+# Tries the new labels first, then falls back to the legacy label.
+find_agent_container() {
+    local name_pattern=$1
+    local ids
+    ids=$($RUN_CMD ps -a -q -f name="$name_pattern" -f label="$ORGANIZATION" -f label="$PRODUCT")
+    if [[ -z "$ids" ]]; then
+        ids=$($RUN_CMD ps -a -q -f name="$name_pattern" -f label="$LEGACY_PRODUCT")
+        if [[ -n "$ids" ]]; then
+            echo "WARNING: Agent container found using deprecated label '$LEGACY_PRODUCT'. It will get the new labels when it is next recreated (stop + start)." >&2
+        fi
+    fi
+    echo "$ids"
+}
+
+show_agent_container() {
+    [[ -z "$1" ]] && return 0
+    local id_filters=()
+    for id in $1; do id_filters+=(-f id="$id"); done
+    $RUN_CMD ps "${id_filters[@]}" --format "table {{.ID}}\t{{.Names}}\t{{.Status}}"
+}
+
 status_agent() {
-    # agent container name will start with controller and label fivetran=ldp is set.
-    CONTAINER_ID=$($RUN_CMD ps -a -q -f name="^/?controller" -f label=fivetran=ldp)
+    # agent container name will start with controller and the agent labels are set.
+    CONTAINER_ID=$(find_agent_container "^/?controller")
     if [[ -z "$CONTAINER_ID" ]]; then
         echo "Agent container not found."
     else
-        $RUN_CMD ps -f name="^/?controller" -f label=fivetran=ldp --format "table {{.ID}}\t{{.Names}}\t{{.Status}}"
+        show_agent_container "$CONTAINER_ID"
     fi
 }
 
@@ -560,12 +534,12 @@ stop_workers() {
 }
 
 stop_agent() {
-    # agent container name will start with controller and label fivetran=ldp is set.
-    CONTAINER_ID=$($RUN_CMD ps -a -q -f name="^/?controller" -f label=fivetran=ldp)
+    # agent container name will start with controller and the agent labels are set.
+    CONTAINER_ID=$(find_agent_container "^/?controller")
     if [[ -z "$CONTAINER_ID" ]]; then
         echo "Agent container not found, nothing to stop."
     else
-        $RUN_CMD ps -f name="^/?controller" -f label=fivetran=ldp --format "table {{.ID}}\t{{.Names}}\t{{.Status}}"
+        show_agent_container "$CONTAINER_ID"
         echo "Stopping agent and cleaning up container"
         $RUN_CMD stop $CONTAINER_ID > /dev/null 2>&1 || true
         $RUN_CMD rm $CONTAINER_ID > /dev/null 2>&1 || true
@@ -574,7 +548,7 @@ stop_agent() {
 
 start_agent() {
     # Remove existing stopped "controller" container if it exists
-    EXISTING=$($RUN_CMD ps -a -q -f name="^/?controller$" -f label=fivetran=ldp)
+    EXISTING=$(find_agent_container "^/?controller$")
     if [[ -n "$EXISTING" ]]; then
         echo "Removing old stopped container named 'controller'"
         $RUN_CMD rm "$EXISTING"
@@ -585,8 +559,6 @@ start_agent() {
     $RUN_CMD network create --driver bridge $CONTAINER_NETWORK > /dev/null 2>&1
     set -e
 
-    setup_kerberos_auth_if_enabled
-
     local DNS_ARGS=()
     if [[ -n "$CUSTOM_DNS" ]]; then
         IFS=',' read -ra _dns_list <<< "$CUSTOM_DNS"
@@ -596,22 +568,32 @@ start_agent() {
         done
     fi
 
+    local LABEL_ARGS=(
+        # new labels
+        --label "$ORGANIZATION"
+        --label "$PRODUCT"
+        --label "processId=$CONTROLLER_PROCESS_ID"
+        --label "controllerId=$CONTROLLER_ID"
+        --label "containerType=$CONTROLLER_CONTAINER_TYPE"
+        # legacy labels (DEPRECATED)
+        --label "$LEGACY_PRODUCT"
+        --label "ldp_process_id=$CONTROLLER_PROCESS_ID"
+        --label "ldp_controller_id=$CONTROLLER_ID"
+        --label "ldp_container_type=$CONTROLLER_CONTAINER_TYPE"
+    )
+
     # create and run the agent container in background
     $RUN_CMD run \
         -d \
         --restart "on-failure:3" \
         --pull "always" \
         --memory=2048m \
-        --label fivetran=ldp \
-        --label ldp_process_id=default-controller-process-id \
-        --label ldp_controller_id=$CONTROLLER_ID \
-        --label ldp_container_type=CONTROLLER \
+        "${LABEL_ARGS[@]}" \
         --security-opt label=disable \
         --name controller \
         --network $CONTAINER_NETWORK \
         --env HOST_USER_HOME_DIR=$HOME \
         --env CONTAINER_ENV_TYPE=$CONTAINER_ENV_TYPE \
-        "${KERBEROS_ENV_ARGS[@]}" \
         "${DNS_ARGS[@]}" \
         -v $BASE_DIR/conf:/conf \
         -v $BASE_DIR/logs:/logs \
@@ -619,12 +601,12 @@ start_agent() {
         $AGENT_IMAGE -f /conf/config.json
 
     sleep 3
-    $RUN_CMD ps -f name="^/?controller" -f label=fivetran=ldp --format "table {{.ID}}\t{{.Names}}\t{{.Status}}"
+    show_agent_container "$(find_agent_container "^/?controller$")"
 }
 
 restart_existing_agent_if_needed() {
     # Check if a "controller" container exists (stopped or exited)
-    CONTAINER_ID=$($RUN_CMD ps -a -q -f name="^/^controller.*$" -f label=fivetran=ldp)
+    CONTAINER_ID=$(find_agent_container "^/?controller.*$")
 
     if [[ -n "$CONTAINER_ID" ]]; then
         STATUS=$($RUN_CMD inspect --format '{{.State.Status}}' $CONTAINER_ID)
